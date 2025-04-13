@@ -53,10 +53,11 @@ class EmbeddingManager(nn.Module):
             per_image_tokens=False,
             num_vectors_per_token=1,
             progressive_words=False,
+            alpha=None,
             **kwargs
     ):
         super().__init__()
-
+        self.loaded = False
         self.string_to_token_dict = {}
         
         self.string_to_param_dict = nn.ParameterDict()
@@ -93,15 +94,9 @@ class EmbeddingManager(nn.Module):
             linear(
                 time_embed_dim, token_dim),
         )
-        # self.time_x = TimeX(
-        #                 token_dim,
-        #                 time_embed_dim,
-        #                 dropout=0,
-        #                 out_channels=token_dim,
-        #             )
-        
+ 
         self.attention = Attentions(dim=token_dim, n_heads=8, d_head=64, dropout = 0.05) 
-
+        self.alpha = alpha
         for idx, placeholder_string in enumerate(placeholder_strings):
             
             token = get_token_for_string(placeholder_string)
@@ -121,51 +116,56 @@ class EmbeddingManager(nn.Module):
             self.string_to_token_dict[placeholder_string] = token
             self.string_to_param_dict[placeholder_string] = token_params
 
-    def forward(
-            self,
-            tokenized_text,
-            embedded_text,
-            timestep=None
+
+    def process_embeddings(
+        self,
+        tokenized_text,
+        embedded_text,
+        timestep,
+        string_to_token_dict,
+        initial_embeddings,
+        string_to_param_dict,
+        max_vectors_per_token,
+        progressive_words=False,
+        progressive_counter=0,
+        emb_layers=None,
+        attention=None,
+        time_embed=None,
+        progressive_scale=1
     ):
-        
-        # timestep = torch.tensor([400], dtype=torch.int64).to(tokenized_text.device)
-        # if timestep < standard:
-        #     timestep = standard
-        token_dim = 768
+        token_dim = embedded_text.shape[2]
         t_emb = timestep_embedding(timestep, token_dim, repeat_only=False)
-        emb = self.time_embed(t_emb)
+        emb = time_embed(t_emb)
 
         b, n, device = *tokenized_text.shape, tokenized_text.device
-        for placeholder_string, placeholder_token in self.string_to_token_dict.items():
 
-            if self.initial_embeddings[placeholder_string] is None:
-                print('Working with NO IMGAE mode')
-                self.initial_embeddings[placeholder_string] = self.get_embedding_for_tkn('').unsqueeze(0).repeat(self.max_vectors_per_token, 1).to(device)
-            # else:
-            #     print('Working with IMGAE GUIDING mode')
-            #     placeholder_embedding = self.attention(self.initial_embeddings[placeholder_string].view(b,1,768).to(device), self.initial_embeddings.view(b,1,768).to(device))[-1].view(self.max_vectors_per_token,768)  
-            
-            if self.string_to_param_dict is not None:
-                self.string_to_param_dict[placeholder_string] = torch.nn.Parameter(self.initial_embeddings[placeholder_string], requires_grad=False).to(device)
-        
-            h = self.emb_layers(emb).view(b, 1, token_dim) + self.initial_embeddings[placeholder_string]
-            placeholder_embedding = self.attention(h, h).view(b, token_dim)
-            # placeholder_embedding = self.string_to_param_dict[placeholder_string].to(device)
+        for placeholder_string, placeholder_token in string_to_token_dict.items():
+            if initial_embeddings[placeholder_string] is None:
+                print('Working with NO IMAGE mode')
+                # Create a zero embedding if no guidance
+                initial_embeddings[placeholder_string] = self.get_embedding_for_tkn('').unsqueeze(0).repeat(
+                    max_vectors_per_token, 1).to(device)
 
-            if self.max_vectors_per_token == 1:  # If there's only one vector per token, we can do a simple replacement
+            if string_to_param_dict is not None:
+                string_to_param_dict[placeholder_string] = torch.nn.Parameter(
+                    initial_embeddings[placeholder_string], requires_grad=False).to(device)
+
+            h = emb_layers(emb).view(b, 1, token_dim) + initial_embeddings[placeholder_string]
+            placeholder_embedding = attention(h, h).view(b, token_dim)
+
+            if max_vectors_per_token == 1:
                 placeholder_idx = torch.where(tokenized_text == placeholder_token.to(device))
                 embedded_text[placeholder_idx] = placeholder_embedding.float()
-            else:  # otherwise, need to insert and keep track of changing indices
-                if self.progressive_words:
-                    self.progressive_counter += 1
-                    max_step_tokens = 1 + self.progressive_counter // PROGRESSIVE_SCALE
+            else:
+                if progressive_words:
+                    progressive_counter += 1
+                    max_step_tokens = 1 + progressive_counter // progressive_scale
                 else:
-                    max_step_tokens = self.max_vectors_per_token
+                    max_step_tokens = max_vectors_per_token
 
                 num_vectors_for_token = min(placeholder_embedding.shape[0], max_step_tokens)
 
                 placeholder_rows, placeholder_cols = torch.where(tokenized_text == placeholder_token.to(device))
-
                 if placeholder_rows.nelement() == 0:
                     continue
 
@@ -176,18 +176,98 @@ class EmbeddingManager(nn.Module):
                     row = sorted_rows[idx]
                     col = sorted_cols[idx]
 
-                    new_token_row = torch.cat([tokenized_text[row][:col], placeholder_token.repeat(num_vectors_for_token).to(device), tokenized_text[row][col + 1:]], axis=0)[:n]
-                    new_embed_row = torch.cat([embedded_text[row][:col], placeholder_embedding[:num_vectors_for_token], embedded_text[row][col + 1:]], axis=0)[:n]
+                    new_token_row = torch.cat([
+                        tokenized_text[row][:col],
+                        placeholder_token.repeat(num_vectors_for_token).to(device),
+                        tokenized_text[row][col + 1:]
+                    ], axis=0)[:n]
 
-                    embedded_text[row]  = new_embed_row
+                    new_embed_row = torch.cat([
+                        embedded_text[row][:col],
+                        placeholder_embedding[:num_vectors_for_token],
+                        embedded_text[row][col + 1:]
+                    ], axis=0)[:n]
+
+                    embedded_text[row] = new_embed_row
                     tokenized_text[row] = new_token_row
 
-        return embedded_text
+        return embedded_text, tokenized_text, progressive_counter
 
-    # def save(self, ckpt_path):
-    #     torch.save({"string_to_token": self.string_to_token_dict,
-    #                 "string_to_param": self.string_to_param_dict}, ckpt_path)
+    def forward(
+            self,
+            tokenized_text,
+            embedded_text,
+            timestep=None
+    ):
+        if self.loaded:
+            embeddings = []
+            for i in range(self.n_embeddings):
+                self.string_to_token_dict = self.string_to_token_dict_list[i]
+                self.attention = self.attention_list[i]
+                self.time_embed = self.time_embed_list[i]
+                self.emb_layers = self.emb_layers_list[i]
+                self.initial_embeddings = self.initial_embeddings_list[i]
+                
+                embedded_text_temp, _, _ = self.process_embeddings(
+                    tokenized_text=tokenized_text,
+                    embedded_text=embedded_text,
+                    timestep=timestep,
+                    string_to_token_dict=self.string_to_token_dict,
+                    initial_embeddings=self.initial_embeddings,
+                    string_to_param_dict=self.string_to_param_dict,
+                    max_vectors_per_token=self.max_vectors_per_token,
+                    progressive_words=self.progressive_words,
+                    progressive_counter=self.progressive_counter,
+                    emb_layers=self.emb_layers,
+                    attention=self.attention,
+                    time_embed=self.time_embed,
+                    progressive_scale=PROGRESSIVE_SCALE
+                )
+                embeddings.append(embedded_text_temp.clone())
+                
+            alpha = self.alpha
+            if not alpha:
+                alpha = [1.0/self.n_embeddings]*self.n_embeddings
+            embedded_text = self.interpolate_embeddings(embeddings, alpha=alpha)
+        else:
+            embedded_text, _, _ = self.process_embeddings(
+            tokenized_text=tokenized_text,
+            embedded_text=embedded_text,
+            timestep=timestep,
+            string_to_token_dict=self.string_to_token_dict,
+            initial_embeddings=self.initial_embeddings,
+            string_to_param_dict=self.string_to_param_dict,
+            max_vectors_per_token=self.max_vectors_per_token,
+            progressive_words=self.progressive_words,
+            progressive_counter=self.progressive_counter,
+            emb_layers=self.emb_layers,
+            attention=self.attention,
+            time_embed=self.time_embed,
+            progressive_scale=PROGRESSIVE_SCALE
+            )
+        return embedded_text
     
+    def interpolate_embeddings(self, embeddings, alpha):
+        """
+        Interpolates a list of embeddings using the provided alpha weights.
+
+        Args:
+            embeddings (List[Tensor]): List of tensors to interpolate, each of shape (...).
+            alpha (List[float] or Tensor): Interpolation weights, one per embedding.
+
+        Returns:
+            Tensor: Interpolated embedding tensor.
+        """
+        embeddings = torch.stack(embeddings, dim=0)  # Shape: (n, ...)
+        alpha = torch.tensor(alpha, dtype=embeddings.dtype, device=embeddings.device)  # Shape: (n,)
+        alpha = alpha / alpha.sum()  # Normalize to sum to 1 (optional but often desirable)
+
+        # Add dimensions to alpha for broadcasting
+        while alpha.dim() < embeddings.dim():
+            alpha = alpha.unsqueeze(-1)
+
+        interpolated = (embeddings * alpha).sum(dim=0)
+        return interpolated
     def save(self, ckpt_path):
         torch.save({
                 "string_to_token": self.string_to_token_dict,
@@ -197,16 +277,26 @@ class EmbeddingManager(nn.Module):
                 "initial_embeddings": self.initial_embeddings
                 }, ckpt_path)
         
-    def load(self, ckpt_path):
-        ckpt = torch.load(ckpt_path, map_location='cpu')
-        print('find keys:', ckpt.keys())
-        self.string_to_token_dict = ckpt["string_to_token"]
-        self.attention = ckpt["attention"]
-        self.time_embed = ckpt["time_embed"]
-        self.emb_layers = ckpt["emb_layers"]
-        self.initial_embeddings = ckpt["initial_embeddings"]
-        # self.string_to_param_dict = ckpt["string_to_param"]
+    def load(self, ckpt_paths, device):
+        if isinstance(ckpt_paths, str):
+            ckpt_paths = [ckpt_paths]
 
+        self.string_to_token_dict_list = []
+        self.attention_list = []
+        self.time_embed_list = []
+        self.emb_layers_list = []
+        self.initial_embeddings_list = []
+
+        for path in ckpt_paths:
+            ckpt = torch.load(path, map_location='cpu', weights_only=False)
+            self.string_to_token_dict_list.append(ckpt["string_to_token"])
+            self.attention_list.append(ckpt["attention"].to(device))
+            self.time_embed_list.append(ckpt["time_embed"].to(device))
+            self.emb_layers_list.append(ckpt["emb_layers"].to(device))
+            self.initial_embeddings_list.append(ckpt["initial_embeddings"].to(device))
+
+        self.n_embeddings = len(self.string_to_token_dict_list)
+        self.loaded = True
     def get_embedding_norms_squared(self):
         all_params = torch.cat(list(self.string_to_param_dict.values()), axis=0) # num_placeholders x embedding_dim
         param_norm_squared = (all_params * all_params).sum(axis=-1)              # num_placeholders
@@ -288,3 +378,4 @@ class TimeX(nn.Module):
         emb_out = self.emb_layers(emb).type(h.dtype)
         h = h + emb_out
         h = self.out_layers(h)
+
