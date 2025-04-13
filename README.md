@@ -11,6 +11,8 @@ Audio samples available at https://kariander1.github.io/interp-music-style/, or 
 
 ## 🛠️ Installation
 
+**Please use python 3.10.**
+
 ```bash
 # Clone the repository
 git clone https://github.com/kariander1/interp-music-style
