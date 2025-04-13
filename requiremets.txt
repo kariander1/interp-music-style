@@ -10,6 +10,7 @@ antlr4-python3-runtime==4.9.3
 argh==0.31.3
 async-timeout==5.0.1
 attrs==25.3.0
+beautifulsoup4==4.13.3
 blinker==1.9.0
 Brotli @ file:///croot/brotli-split_1736182456865/work
 cachetools==5.5.2
@@ -23,6 +24,7 @@ frozenlist==1.5.0
 fsspec==2025.3.2
 ftfy==6.3.1
 future==1.0.0
+gdown==5.2.0
 gitdb==4.0.12
 GitPython==3.1.44
 gmpy2 @ file:///croot/gmpy2_1738085463648/work
@@ -37,7 +39,6 @@ jsonschema==4.23.0
 jsonschema-specifications==2024.10.1
 kornia==0.8.0
 kornia_rs==0.1.8
--e git+https://github.com/lsfhuihuiff/MusicTI_AAAI2024@19c2200e7ef6da20cfa8beda6ee6b18b3d094e96#egg=latent_diffusion
 lightning-utilities==0.14.3
 Markdown==3.8
 MarkupSafe @ file:///croot/markupsafe_1738584038848/work
@@ -90,6 +91,7 @@ scipy==1.15.2
 simsimd==6.2.1
 six==1.17.0
 smmap==5.0.2
+soupsieve==2.6
 streamlit==1.44.1
 stringzilla==3.12.3
 sympy==1.13.1

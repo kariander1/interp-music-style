@@ -11,3 +11,4 @@ output
 **/__pycache__/
 *.sbatch
 latent_diffusion.egg-info/PKG-INFO
+*.sh
