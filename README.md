@@ -64,7 +64,7 @@ To generate music using a learned style embedding or a combination of styles, ru
 Generate audio with a single style (e.g., "accordion"):
 
 ```bash
-python scripts/txt2img.py \
+python -m scripts.txt2img \
     --ddim_eta 0.0 \
     --n_samples 1 \
     --n_iter 2 \
@@ -85,7 +85,7 @@ python scripts/txt2img.py \
 Interpolate between two styles (e.g., "accordion" and "chime"):
 
 ```bash
-python scripts/txt2img.py \
+python -m scripts.txt2img \
     --ddim_eta 0.0 \
     --n_samples 1 \
     --n_iter 2 \
