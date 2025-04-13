@@ -2,33 +2,129 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>WAV File Player</title>
+    <title>Music Style Interpolation</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 40px;
+            max-width: 1000px;
+        }
+
+        h1, h2 {
+            color: #2c3e50;
+        }
+
+        img {
+            max-width: 100%;
+            height: auto;
+            margin-bottom: 20px;
+        }
+
+        .audio-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .audio-cell {
+            text-align: center;
+        }
+
+        audio {
+            width: 100%;
+        }
+
+        .label {
+            font-weight: bold;
+            margin-bottom: 5px;
+            display: block;
+        }
+
+        hr {
+            margin: 40px 0;
+        }
+    </style>
 </head>
 <body>
-    <h1>WAV File Player</h1>
+    <h1>Music Style Interpolation</h1>
 
-    <ul>
-        <li>
-            <p>File 1</p>
+    <img src="assets/method.jpg" alt="Method Diagram">
+
+    <p>
+        This project extends 
+        <a href="https://github.com/lsfhuihuiff/MusicTI_AAAI2024" target="_blank">
+            MusicTI (AAAI 2024)
+        </a> 
+        by introducing <em>style interpolation</em> capabilities for music generation. 
+        We evaluate how interpolating between different music style embeddings affects the generated audio, 
+        exploring smooth transitions and fusion of stylistic elements.
+    </p>
+
+    <p>
+        This work was carried out as part of the 
+        <strong>"Advanced Topics in Audio Processing Using Deep Learning"</strong> 
+        course at Tel Aviv University.
+    </p>
+
+    <hr>
+
+    <h2>Source Audio</h2>
+    <div class="audio-row">
+        <div class="audio-cell">
+            <span class="label">Content: Violin</span>
             <audio controls>
-                <source src="audio/file1.wav" type="audio/wav">
-                Your browser does not support the audio element.
+                <source src="audios/content/violin/violin1.wav" type="audio/wav">
             </audio>
-        </li>
-        <li>
-            <p>File 2</p>
+        </div>
+        <div class="audio-cell">
+            <span class="label">Style 1: Accordion</span>
             <audio controls>
-                <source src="audio/file2.wav" type="audio/wav">
-                Your browser does not support the audio element.
+                <source src="audios/style/accordion/accordion.wav" type="audio/wav">
             </audio>
-        </li>
-        <li>
-            <p>File 3</p>
+        </div>
+        <div class="audio-cell">
+            <span class="label">Style 2: Chime</span>
             <audio controls>
-                <source src="audio/file3.wav" type="audio/wav">
-                Your browser does not support the audio element.
+                <source src="audios/style/chime/chime1.wav" type="audio/wav">
             </audio>
-        </li>
-    </ul>
+        </div>
+    </div>
+
+    <hr>
+
+    <h2>Interpolated Outputs</h2>
+    <div class="audio-row">
+        <div class="audio-cell">
+            <span class="label">100% Style 1</span>
+            <audio controls>
+                <source src="assets/samples/s_1_0_0_0_c_violin/violin/audios/violin1.wav" type="audio/wav">
+            </audio>
+        </div>
+        <div class="audio-cell">
+            <span class="label">75% Style 1</span>
+            <audio controls>
+                <source src="assets/samples/s_0_75_0_25_c_violin/violin/audios/violin1.wav" type="audio/wav">
+            </audio>
+        </div>
+        <div class="audio-cell">
+            <span class="label">50% Style 1 / 50% Style 2</span>
+            <audio controls>
+                <source src="assets/samples/s_0_5_0_5_c_violin/violin/audios/violin1.wav" type="audio/wav">
+            </audio>
+        </div>
+        <div class="audio-cell">
+            <span class="label">25% Style 1</span>
+            <audio controls>
+                <source src="assets/samples/s_0_25_0_75_c_violin/violin/audios/violin1.wav" type="audio/wav">
+            </audio>
+        </div>
+        <div class="audio-cell">
+            <span class="label">100% Style 2</span>
+            <audio controls>
+                <source src="assets/samples/s_0_0_1_0_c_violin/violin/audios/violin1.wav" type="audio/wav">
+            </audio>
+        </div>
+    </div>
 </body>
 </html>
