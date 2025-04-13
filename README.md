@@ -130,7 +130,7 @@ This will download all required **audio files**.
 
 To convert all audio files into mel-spectrogram images, run:
 ```bash
-python data/audios_to_images.py
+python -m data.audios_to_images
 ```
 
 ---
@@ -150,7 +150,7 @@ Alternatively, you can learn embeddings for **all styles** using:
 
 After training embeddings, generate samples using:
 ```bash
-python evaluation/generate_samples.py
+python -m evaluation.generate_samples
 ```
 
 This script will use the learned embeddings and content inputs to generate outputs for evaluation, both dual (interpolated) styles and single styles.
@@ -161,7 +161,7 @@ This script will use the learned embeddings and content inputs to generate outpu
 
 Compute content preservation and style alignment metrics using:
 ```bash
-python evaluation/clap_eval.py
+python -m evaluation.clap_eval
 ```
 
 - Evaluates cosine similarities between audio and text CLAP embeddings.
