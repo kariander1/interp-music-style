@@ -2,6 +2,7 @@ import argparse, os, sys, datetime, glob, importlib, csv
 import numpy as np
 import time
 import torch
+import json
 
 import torchvision
 import pytorch_lightning as pl
@@ -16,6 +17,8 @@ from pytorch_lightning import seed_everything
 from pytorch_lightning.trainer import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, Callback, LearningRateMonitor
 from lightning_utilities.core.rank_zero import rank_zero_only
+# from pytorch_lightning.utilities.distributed import rank_zero_only
+
 from pytorch_lightning.utilities import rank_zero_info
 
 from ldm.data.base import Txt2ImgIterableBaseDataset
@@ -344,8 +347,9 @@ class ImageLogger(Callback):
         self.batch_freq = batch_frequency
         self.max_images = max_images
         self.logger_log_images = {
-            pl.loggers.TestTubeLogger: self._testtube,
+            pl.loggers.TensorBoardLogger: self._tensorboard,
         }
+
         self.log_steps = [2 ** n for n in range(int(np.log2(self.batch_freq)) + 1)]
         if not increase_log_steps:
             self.log_steps = [self.batch_freq]
@@ -356,7 +360,7 @@ class ImageLogger(Callback):
         self.log_first_step = log_first_step
 
     @rank_zero_only
-    def _testtube(self, pl_module, images, batch_idx, split):
+    def _tensorboard(self, pl_module, images, batch_idx, split):
         for k in images:
             grid = torchvision.utils.make_grid(images[k])
             grid = (grid + 1.0) / 2.0  # -1,1 -> 0,1; c,h,w
@@ -429,11 +433,11 @@ class ImageLogger(Callback):
             return True
         return False
 
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         if not self.disabled and (pl_module.global_step > 0 or self.log_first_step):
             self.log_img(pl_module, batch, batch_idx, split="train")
 
-    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         if not self.disabled and pl_module.global_step > 0:
             self.log_img(pl_module, batch, batch_idx, split="val")
         if hasattr(pl_module, 'calibrate_grad_norm'):
@@ -445,13 +449,20 @@ class CUDACallback(Callback):
     # see https://github.com/SeanNaren/minGPT/blob/master/mingpt/callback.py
     def on_train_epoch_start(self, trainer, pl_module):
         # Reset the memory use counter
-        torch.cuda.reset_peak_memory_stats(trainer.root_gpu)
-        torch.cuda.synchronize(trainer.root_gpu)
+        device = pl_module.device
+        device_index = device.index if device.type == "cuda" else None
+
+
+        torch.cuda.reset_peak_memory_stats(device_index)
+        torch.cuda.synchronize(device_index)
         self.start_time = time.time()
 
     def on_train_epoch_end(self, trainer, pl_module):
-        torch.cuda.synchronize(trainer.root_gpu)
-        max_memory = torch.cuda.max_memory_allocated(trainer.root_gpu) / 2 ** 20
+        device = pl_module.device
+        device_index = device.index if device.type == "cuda" else None
+
+        torch.cuda.synchronize(device_index)
+        max_memory = torch.cuda.max_memory_allocated(device_index) / 2 ** 20
         epoch_time = time.time() - self.start_time
 
         try:
@@ -520,7 +531,7 @@ if __name__ == "__main__":
     #           target: importpath
     #           params:
     #               key: value
-
+    config_path = "configs/trainer_config.json"
     now = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
 
     # add cwd for convenience and to make classes in this file available when
@@ -529,9 +540,19 @@ if __name__ == "__main__":
     sys.path.append(os.getcwd())
 
     parser = get_parser()
-    parser = Trainer.add_argparse_args(parser)
+    # parser = Trainer.add_argparse_args(parser)
+    unknown = []
+    
+    opt, _ = parser.parse_known_args()
+    cli_dict = vars(opt)
 
-    opt, unknown = parser.parse_known_args()
+    if os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            config_dict = json.load(f)
+    else:
+        config_dict = {}
+    merged_config = {**config_dict, **cli_dict}
+    opt = argparse.Namespace(**merged_config)
     if opt.name and opt.resume:
         raise ValueError(
             "-n/--name and -r/--resume cannot be specified both."
@@ -577,250 +598,268 @@ if __name__ == "__main__":
     cfgdir = os.path.join(logdir, "configs")
     seed_everything(opt.seed)
 
-    try:
-        # init and save configs
-        configs = [OmegaConf.load(cfg) for cfg in opt.base]
-        cli = OmegaConf.from_dotlist(unknown)
-        config = OmegaConf.merge(*configs, cli)
-        lightning_config = config.pop("lightning", OmegaConf.create())
-        # merge trainer cli with config
-        trainer_config = lightning_config.get("trainer", OmegaConf.create())
-        # default to ddp
-        trainer_config["accelerator"] = "ddp"
-        for k in nondefault_trainer_args(opt):
-            trainer_config[k] = getattr(opt, k)
-        if not "gpus" in trainer_config:
-            del trainer_config["accelerator"]
-            cpu = True
-        else:
-            gpuinfo = trainer_config["gpus"]
-            print(f"Running on GPUs {gpuinfo}")
-            cpu = False
-        trainer_opt = argparse.Namespace(**trainer_config)
-        lightning_config.trainer = trainer_config
+    # try:
+    # init and save configs
+    configs = [OmegaConf.load(cfg) for cfg in opt.base]
+    cli = OmegaConf.from_dotlist(unknown)
+    config = OmegaConf.merge(*configs, cli)
+    lightning_config = config.pop("lightning", OmegaConf.create())
+    # merge trainer cli with config
+    trainer_config = lightning_config.get("trainer", OmegaConf.create())
+    # default to ddp
+    trainer_config["accelerator"] = "ddp"
+    for k in ['gpus']:
+        trainer_config[k] = getattr(opt, k)
+    if not "gpus" in trainer_config:
+        del trainer_config["accelerator"]
+        cpu = True
+    else:
+        gpuinfo = trainer_config["gpus"]
+        print(f"Running on GPUs {gpuinfo}")
+        cpu = False
+    trainer_opt = argparse.Namespace(**trainer_config)
+    lightning_config.trainer = trainer_config
 
-        # model
+    # model
 
-        # config.model.params.personalization_config.params.init_word = opt.init_word
-        config.model.params.personalization_config.params.embedding_manager_ckpt = opt.embedding_manager_ckpt
-        if opt.placeholder_string:
-            config.model.params.personalization_config.params.placeholder_strings = [opt.placeholder_string]
+    # config.model.params.personalization_config.params.init_word = opt.init_word
+    config.model.params.personalization_config.params.embedding_manager_ckpt = opt.embedding_manager_ckpt
+    if opt.placeholder_string:
+        config.model.params.personalization_config.params.placeholder_strings = [opt.placeholder_string]
 
-        if opt.init_word:
-            config.model.params.personalization_config.params.initializer_words[0] = opt.init_word
+    if opt.init_word:
+        config.model.params.personalization_config.params.initializer_words[0] = opt.init_word
 
-        if opt.actual_resume:
-            model = load_model_from_config(config, opt.actual_resume)
-        else:
-            model = instantiate_from_config(config.model)
+    if opt.actual_resume:
+        model = load_model_from_config(config, opt.actual_resume)
+        # device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        # model = model.to(device)
+    else:
+        model = instantiate_from_config(config.model)
 
-        # trainer and callbacks
-        trainer_kwargs = dict()
+    # trainer and callbacks
+    trainer_kwargs = dict()
 
-        # default logger configs
-        default_logger_cfgs = {
-            "wandb": {
-                "target": "pytorch_lightning.loggers.WandbLogger",
-                "params": {
-                    "name": nowname,
-                    "save_dir": logdir,
-                    "offline": opt.debug,
-                    "id": nowname,
-                }
-            },
-            "testtube": {
-                "target": "pytorch_lightning.loggers.TestTubeLogger",
-                "params": {
-                    "name": "testtube",
-                    "save_dir": logdir,
-                }
-            },
-        }
-        default_logger_cfg = default_logger_cfgs["testtube"]
-        if "logger" in lightning_config:
-            logger_cfg = lightning_config.logger
-        else:
-            logger_cfg = OmegaConf.create()
-        logger_cfg = OmegaConf.merge(default_logger_cfg, logger_cfg)
-        trainer_kwargs["logger"] = instantiate_from_config(logger_cfg)
-
-        # modelcheckpoint - use TrainResult/EvalResult(checkpoint_on=metric) to
-        # specify which metric is used to determine best models
-        default_modelckpt_cfg = {
-            "target": "pytorch_lightning.callbacks.ModelCheckpoint",
+    # default logger configs
+    default_logger_cfgs = {
+        "wandb": {
+            "target": "pytorch_lightning.loggers.WandbLogger",
             "params": {
-                "dirpath": ckptdir,
-                "filename": "{epoch:06}",
-                "verbose": True,
-                "save_last": True,
+                "name": nowname,
+                "save_dir": logdir,
+                "offline": opt.debug,
+                "id": nowname,
             }
-        }
-        if hasattr(model, "monitor"):
-            print(f"Monitoring {model.monitor} as checkpoint metric.")
-            default_modelckpt_cfg["params"]["monitor"] = model.monitor
-            default_modelckpt_cfg["params"]["save_top_k"] = 1
-
-        if "modelcheckpoint" in lightning_config:
-            modelckpt_cfg = lightning_config.modelcheckpoint
-        else:
-            modelckpt_cfg =  OmegaConf.create()
-        modelckpt_cfg = OmegaConf.merge(default_modelckpt_cfg, modelckpt_cfg)
-        print(f"Merged modelckpt-cfg: \n{modelckpt_cfg}")
-        if version.parse(pl.__version__) < version.parse('1.4.0'):
-            trainer_kwargs["checkpoint_callback"] = instantiate_from_config(modelckpt_cfg)
-
-        # add callback which sets up log directory
-        default_callbacks_cfg = {
-            "setup_callback": {
-                "target": "main.SetupCallback",
-                "params": {
-                    "resume": opt.resume,
-                    "now": now,
-                    "logdir": logdir,
-                    "ckptdir": ckptdir,
-                    "cfgdir": cfgdir,
-                    "config": config,
-                    "lightning_config": lightning_config,
-                }
-            },
-            "image_logger": {
-                "target": "main.ImageLogger",
-                "params": {
-                    "batch_frequency": 750,
-                    "max_images": 4,
-                    "clamp": True
-                }
-            },
-            "learning_rate_logger": {
-                "target": "main.LearningRateMonitor",
-                "params": {
-                    "logging_interval": "step",
-                    # "log_momentum": True
-                }
-            },
-            "cuda_callback": {
-                "target": "main.CUDACallback"
-            },
-        }
-        if version.parse(pl.__version__) >= version.parse('1.4.0'):
-            default_callbacks_cfg.update({'checkpoint_callback': modelckpt_cfg})
-
-        if "callbacks" in lightning_config:
-            callbacks_cfg = lightning_config.callbacks
-        else:
-            callbacks_cfg = OmegaConf.create()
-
-        if 'metrics_over_trainsteps_checkpoint' in callbacks_cfg:
-            print(
-                'Caution: Saving checkpoints every n train steps without deleting. This might require some free space.')
-            default_metrics_over_trainsteps_ckpt_dict = {
-                'metrics_over_trainsteps_checkpoint':
-                    {"target": 'pytorch_lightning.callbacks.ModelCheckpoint',
-                     'params': {
-                         "dirpath": os.path.join(ckptdir, 'trainstep_checkpoints'),
-                         "filename": "{epoch:06}-{step:09}",
-                         "verbose": True,
-                         'save_top_k': -1,
-                         'every_n_train_steps': 10000,
-                         'save_weights_only': True
-                     }
-                     }
+        },
+        "testtube": {
+            "target": "pytorch_lightning.loggers.TestTubeLogger",
+            "params": {
+                "name": "testtube",
+                "save_dir": logdir,
             }
-            default_callbacks_cfg.update(default_metrics_over_trainsteps_ckpt_dict)
+        },
+        "tensorboard": {
+    "target": "pytorch_lightning.loggers.TensorBoardLogger",
+    "params": {
+        "save_dir": logdir,
+        "name": nowname,
+        }
+        },
+    }
+    default_logger_cfg = default_logger_cfgs["tensorboard"]
+    if "logger" in lightning_config:
+        logger_cfg = lightning_config.logger
+    else:
+        logger_cfg = OmegaConf.create()
+    logger_cfg = OmegaConf.merge(default_logger_cfg, logger_cfg)
+    trainer_kwargs["logger"] = instantiate_from_config(logger_cfg)
 
-        callbacks_cfg = OmegaConf.merge(default_callbacks_cfg, callbacks_cfg)
-        if 'ignore_keys_callback' in callbacks_cfg and hasattr(trainer_opt, 'resume_from_checkpoint'):
-            callbacks_cfg.ignore_keys_callback.params['ckpt_path'] = trainer_opt.resume_from_checkpoint
-        elif 'ignore_keys_callback' in callbacks_cfg:
-            del callbacks_cfg['ignore_keys_callback']
+    # modelcheckpoint - use TrainResult/EvalResult(checkpoint_on=metric) to
+    # specify which metric is used to determine best models
+    default_modelckpt_cfg = {
+        "target": "pytorch_lightning.callbacks.ModelCheckpoint",
+        "params": {
+            "dirpath": ckptdir,
+            "filename": "{epoch:06}",
+            "verbose": True,
+            "save_last": True,
+        }
+    }
+    if hasattr(model, "monitor"):
+        print(f"Monitoring {model.monitor} as checkpoint metric.")
+        default_modelckpt_cfg["params"]["monitor"] = model.monitor
+        default_modelckpt_cfg["params"]["save_top_k"] = 1
 
-        trainer_kwargs["callbacks"] = [instantiate_from_config(callbacks_cfg[k]) for k in callbacks_cfg]
-        trainer_kwargs["max_steps"] = trainer_opt.max_steps
+    if "modelcheckpoint" in lightning_config:
+        modelckpt_cfg = lightning_config.modelcheckpoint
+    else:
+        modelckpt_cfg =  OmegaConf.create()
+    modelckpt_cfg = OmegaConf.merge(default_modelckpt_cfg, modelckpt_cfg)
+    print(f"Merged modelckpt-cfg: \n{modelckpt_cfg}")
+    if version.parse(pl.__version__) < version.parse('1.4.0'):
+        trainer_kwargs["checkpoint_callback"] = instantiate_from_config(modelckpt_cfg)
 
-        trainer = Trainer.from_argparse_args(trainer_opt, **trainer_kwargs)
-        trainer.logdir = logdir  ###
+    # add callback which sets up log directory
+    default_callbacks_cfg = {
+        "setup_callback": {
+            "target": "main.SetupCallback",
+            "params": {
+                "resume": opt.resume,
+                "now": now,
+                "logdir": logdir,
+                "ckptdir": ckptdir,
+                "cfgdir": cfgdir,
+                "config": config,
+                "lightning_config": lightning_config,
+            }
+        },
+        "image_logger": {
+            "target": "main.ImageLogger",
+            "params": {
+                "batch_frequency": 750,
+                "max_images": 4,
+                "clamp": True
+            }
+        },
+        "learning_rate_logger": {
+            "target": "main.LearningRateMonitor",
+            "params": {
+                "logging_interval": "step",
+                # "log_momentum": True
+            }
+        },
+        "cuda_callback": {
+            "target": "main.CUDACallback"
+        },
+    }
+    if version.parse(pl.__version__) >= version.parse('1.4.0'):
+        default_callbacks_cfg.update({'checkpoint_callback': modelckpt_cfg})
 
-        # data
-        config.data.params.train.params.data_root = opt.data_root
-        config.data.params.validation.params.data_root = opt.data_root
-        data = instantiate_from_config(config.data)
+    if "callbacks" in lightning_config:
+        callbacks_cfg = lightning_config.callbacks
+    else:
+        callbacks_cfg = OmegaConf.create()
 
-        data = instantiate_from_config(config.data)
-        # NOTE according to https://pytorch-lightning.readthedocs.io/en/latest/datamodules.html
-        # calling these ourselves should not be necessary but it is.
-        # lightning still takes care of proper multiprocessing though
-        data.prepare_data()
-        data.setup()
-        print("#### Data #####")
-        for k in data.datasets:
-            print(f"{k}, {data.datasets[k].__class__.__name__}, {len(data.datasets[k])}")
+    if 'metrics_over_trainsteps_checkpoint' in callbacks_cfg:
+        print(
+            'Caution: Saving checkpoints every n train steps without deleting. This might require some free space.')
+        default_metrics_over_trainsteps_ckpt_dict = {
+            'metrics_over_trainsteps_checkpoint':
+                {"target": 'pytorch_lightning.callbacks.ModelCheckpoint',
+                    'params': {
+                        "dirpath": os.path.join(ckptdir, 'trainstep_checkpoints'),
+                        "filename": "{epoch:06}-{step:09}",
+                        "verbose": True,
+                        'save_top_k': -1,
+                        'every_n_train_steps': 10000,
+                        'save_weights_only': True
+                    }
+                    }
+        }
+        default_callbacks_cfg.update(default_metrics_over_trainsteps_ckpt_dict)
 
-        # configure learning rate
-        bs, base_lr = config.data.params.batch_size, config.model.base_learning_rate
-        if not cpu:
-            ngpu = len(lightning_config.trainer.gpus.strip(",").split(','))
-        else:
-            ngpu = 1
-        if 'accumulate_grad_batches' in lightning_config.trainer:
-            accumulate_grad_batches = lightning_config.trainer.accumulate_grad_batches
-        else:
-            accumulate_grad_batches = 1
-        print(f"accumulate_grad_batches = {accumulate_grad_batches}")
-        lightning_config.trainer.accumulate_grad_batches = accumulate_grad_batches
-        if opt.scale_lr:
-            model.learning_rate = accumulate_grad_batches * ngpu * bs * base_lr
-            print(
-                "Setting learning rate to {:.2e} = {} (accumulate_grad_batches) * {} (num_gpus) * {} (batchsize) * {:.2e} (base_lr)".format(
-                    model.learning_rate, accumulate_grad_batches, ngpu, bs, base_lr))
-        else:
-            model.learning_rate = base_lr
-            print("++++ NOT USING LR SCALING ++++")
-            print(f"Setting learning rate to {model.learning_rate:.2e}")
+    callbacks_cfg = OmegaConf.merge(default_callbacks_cfg, callbacks_cfg)
+    if 'ignore_keys_callback' in callbacks_cfg and hasattr(trainer_opt, 'resume_from_checkpoint'):
+        callbacks_cfg.ignore_keys_callback.params['ckpt_path'] = trainer_opt.resume_from_checkpoint
+    elif 'ignore_keys_callback' in callbacks_cfg:
+        del callbacks_cfg['ignore_keys_callback']
+
+    trainer_kwargs["callbacks"] = [instantiate_from_config(callbacks_cfg[k]) for k in callbacks_cfg]
+    trainer_kwargs["max_steps"] = trainer_opt.max_steps
+
+    trainer_init = {**vars(trainer_opt), **trainer_kwargs}
+    trainer_init.pop("gpus", None)
+    # LDM does not support multiple gpus
+    trainer_init['accelerator'] = 'gpu'
+    trainer_init['devices'] = [0]
+    trainer_init['strategy'] = 'auto'
+    trainer_init['num_sanity_val_steps'] = 0
+    trainer = Trainer(**trainer_init)
+    trainer.logdir = logdir  ###
+
+    # data
+    config.data.params.train.params.data_root = opt.data_root
+    config.data.params.validation.params.data_root = opt.data_root
+    data = instantiate_from_config(config.data)
+
+    data = instantiate_from_config(config.data)
+    # NOTE according to https://pytorch-lightning.readthedocs.io/en/latest/datamodules.html
+    # calling these ourselves should not be necessary but it is.
+    # lightning still takes care of proper multiprocessing though
+    data.prepare_data()
+    data.setup()
+    print("#### Data #####")
+    for k in data.datasets:
+        print(f"{k}, {data.datasets[k].__class__.__name__}, {len(data.datasets[k])}")
+
+    # configure learning rate
+    bs, base_lr = config.data.params.batch_size, config.model.base_learning_rate
+    if not cpu:
+        ngpu = len(lightning_config.trainer.gpus.strip(",").split(','))
+    else:
+        ngpu = 1
+    if 'accumulate_grad_batches' in lightning_config.trainer:
+        accumulate_grad_batches = lightning_config.trainer.accumulate_grad_batches
+    else:
+        accumulate_grad_batches = 1
+    print(f"accumulate_grad_batches = {accumulate_grad_batches}")
+    lightning_config.trainer.accumulate_grad_batches = accumulate_grad_batches
+    if opt.scale_lr:
+        model.learning_rate = accumulate_grad_batches * ngpu * bs * base_lr
+        print(
+            "Setting learning rate to {:.2e} = {} (accumulate_grad_batches) * {} (num_gpus) * {} (batchsize) * {:.2e} (base_lr)".format(
+                model.learning_rate, accumulate_grad_batches, ngpu, bs, base_lr))
+    else:
+        model.learning_rate = base_lr
+        print("++++ NOT USING LR SCALING ++++")
+        print(f"Setting learning rate to {model.learning_rate:.2e}")
 
 
-        # allow checkpointing via USR1
-        def melk(*args, **kwargs):
-            # run all checkpoint hooks
-            if trainer.global_rank == 0:
-                print("Summoning checkpoint.")
-                ckpt_path = os.path.join(ckptdir, "last.ckpt")
-                trainer.save_checkpoint(ckpt_path)
-
-
-        def divein(*args, **kwargs):
-            if trainer.global_rank == 0:
-                import pudb;
-                pudb.set_trace()
-
-
-        import signal
-
-        signal.signal(signal.SIGUSR1, melk)
-        signal.signal(signal.SIGUSR2, divein)
-
-        # run
-        if opt.train:
-            try:
-                trainer.fit(model, data)
-            except Exception:
-                melk()
-                raise
-        if not opt.no_test and not trainer.interrupted:
-            trainer.test(model, data)
-    except Exception:
-        if opt.debug and trainer.global_rank == 0:
-            try:
-                import pudb as debugger
-            except ImportError:
-                import pdb as debugger
-            debugger.post_mortem()
-        raise
-    finally:
-        # move newly created debug project to debug_runs
-        if opt.debug and not opt.resume and trainer.global_rank == 0:
-            dst, name = os.path.split(logdir)
-            dst = os.path.join(dst, "debug_runs", name)
-            os.makedirs(os.path.split(dst)[0], exist_ok=True)
-            os.rename(logdir, dst)
+    # allow checkpointing via USR1
+    def melk(*args, **kwargs):
+        # run all checkpoint hooks
         if trainer.global_rank == 0:
-            print(trainer.profiler.summary())
+            print("Summoning checkpoint.")
+            ckpt_path = os.path.join(ckptdir, "last.ckpt")
+            trainer.save_checkpoint(ckpt_path)
+
+
+    def divein(*args, **kwargs):
+        if trainer.global_rank == 0:
+            import pudb;
+            pudb.set_trace()
+
+
+    import signal
+
+    signal.signal(signal.SIGUSR1, melk)
+    signal.signal(signal.SIGUSR2, divein)
+
+    # run
+    if opt.train:
+        try:
+            # device = "cuda" if torch.cuda.is_available() else "cpu"
+            # model = model.to(device)
+            trainer.fit(model, data)
+        except Exception:
+            melk()
+            raise
+    if not opt.no_test and not trainer.interrupted:
+        trainer.test(model, data)
+    # except Exception:
+    #     if opt.debug and trainer.global_rank == 0:
+    #         try:
+    #             import pudb as debugger
+    #         except ImportError:
+    #             import pdb as debugger
+    #         debugger.post_mortem()
+    #     raise
+    # finally:
+    # move newly created debug project to debug_runs
+    if opt.debug and not opt.resume and trainer.global_rank == 0:
+        dst, name = os.path.split(logdir)
+        dst = os.path.join(dst, "debug_runs", name)
+        os.makedirs(os.path.split(dst)[0], exist_ok=True)
+        os.rename(logdir, dst)
+    if trainer.global_rank == 0:
+        print(trainer.profiler.summary())

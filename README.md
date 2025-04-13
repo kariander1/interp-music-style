@@ -165,10 +165,20 @@ python evaluation/clap_eval.py
 ```
 
 - Evaluates cosine similarities between audio and text CLAP embeddings.
-- Results are saved as `.csv` files with metrics and can include visual plots.
+
+
+## 📝 Notes
+
+- **Riffusion**: Used as the base diffusion model for audio generation. It operates on mel-spectrograms by treating them as images and is built on top of Stable Diffusion.
+- **Stable Diffusion**: Serves as the foundational architecture for Riffusion. Originally developed for text-to-image generation.
+- **CLIP**: Provides the text encoder used for conditioning the diffusion model on style prompts via learned embeddings.
+- **Time-Varying Textual Inversion (TVTI)**: Introduces time-varying embeddings that evolve during the diffusion process, allowing more expressive and temporally-aware style control.
+- **CLAP**: Used for evaluation. It maps audio and text to a shared embedding space and is employed to assess both style fit and content preservation.
 
 
 ## 📁 Acknowledgments
 
 Based on [MusicTI (AAAI 2024)](https://github.com/lsfhuihuiff/MusicTI_AAAI2024).  
 We extend their work by introducing and evaluating style embedding interpolation for expressive audio synthesis.
+
+
