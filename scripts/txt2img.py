@@ -71,7 +71,7 @@ def txt2img(
     content_path=None,
     strength=0.99,
     seed=23,
-    convert_to_audio=False,
+    convert_to_audio=True,
     first_content_only=False,
 ):
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -239,8 +239,6 @@ if __name__ == "__main__":
         plms=args.plms,
         ddim_eta=args.ddim_eta,
         n_iter=args.n_iter,
-        H=args.H,
-        W=args.W,
         n_samples=args.n_samples,
         scale=args.scale,
         ckpt_path=args.ckpt_path,
