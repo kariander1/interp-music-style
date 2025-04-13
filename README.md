@@ -102,6 +102,7 @@ python scripts/txt2img.py \
 
 - `--alpha` defines the weight of each style embedding.
 - Outputs are saved as audio files and optionally as spectrograms in `outdir`.
+- Examples for interpolated samples are available in `assets/samples`.
 
 ## 📊 Reproducing Results / Metrics
 
