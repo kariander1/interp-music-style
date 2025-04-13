@@ -24,6 +24,6 @@ def split_wav(input_path: str, output_dir: str, segment_duration: int = 5):
 
 # Example usage
 if __name__ == "__main__":
-    input_wav = "/home/dcor/shaiyehezkel/MusicTI_AAAI2024/images/style/girl/girl_la_la.wav"
-    output_folder = "/home/dcor/shaiyehezkel/MusicTI_AAAI2024/images/style/girl_split"
+    input_wav = "images/style/girl/girl_la_la.wav"
+    output_folder = "images/style/girl_split"
     split_wav(input_wav, output_folder, segment_duration=5)
