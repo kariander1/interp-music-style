@@ -1,0 +1,13 @@
+*.png
+*.wav
+**/*.pyc
+*.pt
+logs
+output
+*.ckpt
+*.out
+*.err
+.vscode
+**/__pycache__/
+*.sbatch
+latent_diffusion.egg-info/PKG-INFO
