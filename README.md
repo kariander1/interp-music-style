@@ -5,6 +5,7 @@
 This project extends [MusicTI (AAAI 2024)](https://github.com/lsfhuihuiff/MusicTI_AAAI2024) by introducing *style interpolation* capabilities for music generation. We evaluate how interpolating between different music style embeddings affects the generated audio, exploring smooth transitions and fusion of stylistic elements.
 
 This work was carried out as part of the "Advanced Topics in Audio Processing Using Deep Learning" course at Tel Aviv University.
+Audio samples available at https://kariander1.github.io/interp-music-style/, or can be manually accessed via `html.index`.
 
 ---
 
