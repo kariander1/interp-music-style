@@ -12,7 +12,8 @@ from einops import rearrange, repeat
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.plms import PLMSSampler
-
+from ldm.models.diffusion.ddpm import LatentDiffusion
+from scripts.utils.cli import image_to_audio
 from pytorch_lightning import seed_everything
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
@@ -20,7 +21,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 def load_model_from_config(config, ckpt, verbose=False):
     print(f"Loading model from {ckpt}")
-    pl_sd = torch.load(ckpt, map_location="cpu")
+    pl_sd = torch.load(ckpt, map_location="cpu", weights_only=False)
     sd = pl_sd["state_dict"]
     model = instantiate_from_config(config.model)
     m, u = model.load_state_dict(sd, strict=False)
@@ -47,6 +48,108 @@ def load_img(path):
     return 2.*image - 1.
 
 
+def load_model(ckpt_path, device) -> LatentDiffusion:
+    config = OmegaConf.load("configs/stable-diffusion/v1-inference.yaml")
+    model: LatentDiffusion
+    model = load_model_from_config(config, ckpt_path)
+    model = model.to(device)
+    return model
+
+def txt2img(
+    prompt="*",
+    outdir="outputs/accordion/",
+    ddim_steps=200,
+    plms=False,
+    ddim_eta=0.0,
+    n_iter=1,
+    n_samples=1,
+    scale=5.0,
+    ckpt_path=None,
+    model=None,
+    embedding_path=None,
+    alpha=None,
+    content_path=None,
+    strength=0.99,
+    seed=23,
+    convert_to_audio=False,
+    first_content_only=False,
+):
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    assert model or ckpt_path, "Must specify either a model or a checkpoint path"
+    seed_everything(seed)
+    if ckpt_path:
+        model = load_model(ckpt_path, device)
+        
+    model.embedding_manager.load(embedding_path, device)
+    model.embedding_manager.alpha = alpha
+    assert len(model.embedding_manager.alpha) == len(embedding_path), \
+        f"Number of alpha {len(model.embedding_manager.alpha)} and embedding paths {len(embedding_path)} do not match"
+    batch_size = n_samples
+
+    
+    model = model.to(device)
+
+    for file in os.listdir(content_path):
+
+        content_name = content_path.split('/')[-1].split('.')[0]
+        content_image = load_img(os.path.join(content_path, file)).to(device)
+        content_image = repeat(content_image, '1 ... -> b ...', b=batch_size)
+        content_latent = model.get_first_stage_encoding(model.encode_first_stage(content_image))  # move to latent space
+
+        init_latent = content_latent
+
+        if plms:
+            sampler = PLMSSampler(model)
+        else:
+            sampler = DDIMSampler(model)
+
+        sampler.make_schedule(ddim_num_steps=ddim_steps, ddim_eta=ddim_eta, verbose=False)
+
+        prompt = prompt
+
+
+        os.makedirs(outdir, exist_ok=True)
+        os.makedirs(os.path.join(outdir, 'images'), exist_ok=True)
+        os.makedirs(os.path.join(outdir, 'audios'), exist_ok=True)
+        all_samples=list()
+        with torch.no_grad():
+            with model.ema_scope():
+                uc = None
+                if scale != 1.0:
+                    uc = batch_size * [""]
+                for n in trange(n_iter, desc="Sampling"):
+                    c = prompt * batch_size
+
+                    t_enc = torch.tensor([int(strength * 1000)], dtype=torch.int64).to(device)
+                    c_enc = model.get_learned_conditioning(batch_size * prompt, t_enc)
+                    x_noisy = model.q_sample(x_start=init_latent, t=t_enc)
+                    model_output = model.apply_model(x_noisy, t_enc, c_enc)
+                    z_enc = sampler.stochastic_encode(init_latent, t_enc,\
+                                                            noise = model_output, use_original_steps = True)
+                    t_enc = torch.tensor([int(strength * ddim_steps)], dtype=torch.int64).to(device)
+                    samples = sampler.decode(z_enc, c, t_enc, 
+                                            unconditional_guidance_scale=scale,
+                                            unconditional_conditioning=uc,
+                                            get_learned_conditioning=model.get_learned_conditioning)
+
+                    x_samples_ddim = model.decode_first_stage(samples)
+                    x_samples_ddim = torch.clamp((x_samples_ddim+1.0)/2.0, min=0.0, max=1.0)
+
+                    for x_sample in x_samples_ddim:
+                        x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
+                        image_save_path = os.path.abspath(os.path.join(outdir, 'images', file))
+                        audio_save_path = os.path.abspath(os.path.join(outdir, 'audios', file.split('.')[0] + '.wav'))
+                        Image.fromarray(x_sample.astype(np.uint8)).save(image_save_path)
+                    all_samples.append(x_samples_ddim)
+
+        if first_content_only:
+            break
+
+        if convert_to_audio:
+            image_to_audio(image = image_save_path, audio = audio_save_path)
+        
+        print(f"Your samples are here: \n{outdir} \nEnjoy.")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
@@ -54,7 +157,7 @@ if __name__ == "__main__":
         "--prompt",
         type=str,
         nargs="?",
-        default="a painting of a virus monster playing guitar",
+        default="*",
         help="the prompt to render"
     )
 
@@ -63,7 +166,7 @@ if __name__ == "__main__":
         type=str,
         nargs="?",
         help="dir to write results to",
-        default="outputs_final/accordion/"
+        default="outputs/accordion/"
     )
     parser.add_argument(
         "--ddim_steps",
@@ -91,19 +194,6 @@ if __name__ == "__main__":
         help="sample this often",
     )
 
-    parser.add_argument(
-        "--H",
-        type=int,
-        default=256,
-        help="image height, in pixel space",
-    )
-
-    parser.add_argument(
-        "--W",
-        type=int,
-        default=256,
-        help="image width, in pixel space",
-    )
 
     parser.add_argument(
         "--n_samples",
@@ -128,91 +218,35 @@ if __name__ == "__main__":
     parser.add_argument(
         "--embedding_path", 
         type=str, 
+        nargs='+',
         help="Path to a pre-trained embedding manager checkpoint")
-    
+  
+    parser.add_argument(
+        "--alpha", 
+        type=float, 
+        nargs='+',
+        help="Alpha for embedding manager interpolation")
+      
     parser.add_argument("--content_path", type=str, help="Path to content image")
     parser.add_argument("--strength", default=0.99, type=float, help="content percent")
     parser.add_argument("--seed", default=23, type=int, help="random seed")
-    opt = parser.parse_args()
-   
-    seed_everything(opt.seed)
-    config = OmegaConf.load("configs/stable-diffusion/v1-inference.yaml")
-    model = load_model_from_config(config, opt.ckpt_path)  # TODO: check path
-    model.embedding_manager.load(opt.embedding_path)
-    batch_size = opt.n_samples
+    args = parser.parse_args()
 
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    model = model.to(device)
-
-    for file in os.listdir(opt.content_path):
-
-        content_name = opt.content_path.split('/')[-1].split('.')[0]
-        content_image = load_img(os.path.join(opt.content_path, file)).to(device)
-        content_image = repeat(content_image, '1 ... -> b ...', b=batch_size)
-        content_latent = model.get_first_stage_encoding(model.encode_first_stage(content_image))  # move to latent space
-
-        init_latent = content_latent
-
-        if opt.plms:
-            sampler = PLMSSampler(model)
-        else:
-            sampler = DDIMSampler(model)
-
-        sampler.make_schedule(ddim_num_steps=opt.ddim_steps, ddim_eta=opt.ddim_eta, verbose=False)
-
-        os.makedirs(opt.outdir, exist_ok=True)
-        outpath = opt.outdir
-
-        prompt = opt.prompt
-
-
-        sample_path = os.path.join(outpath, content_name)
-        os.makedirs(sample_path, exist_ok=True)
-        base_count = len(os.listdir(sample_path))
-
-        all_samples=list()
-        with torch.no_grad():
-            with model.ema_scope():
-                uc = None
-                if opt.scale != 1.0:
-                    uc = batch_size * [""]
-                    # uc = model.get_learned_conditioning(opt.n_samples * [""])
-                for n in trange(opt.n_iter, desc="Sampling"):
-                    # c = model.get_learned_conditioning(opt.n_samples * [prompt])
-                    c = prompt * batch_size
-
-                    t_enc = torch.tensor([int(opt.strength * 1000)], dtype=torch.int64).to(device)
-                    c_enc = model.get_learned_conditioning(batch_size * prompt, t_enc)
-                    x_noisy = model.q_sample(x_start=init_latent, t=t_enc)
-                    model_output = model.apply_model(x_noisy, t_enc, c_enc)
-                    z_enc = sampler.stochastic_encode(init_latent, t_enc,\
-                                                            noise = model_output, use_original_steps = True)
-                    t_enc = torch.tensor([int(opt.strength * opt.ddim_steps)], dtype=torch.int64).to(device)
-                    samples = sampler.decode(z_enc, c, t_enc, 
-                                            unconditional_guidance_scale=opt.scale,
-                                            unconditional_conditioning=uc,
-                                            get_learned_conditioning=model.get_learned_conditioning)
-
-                    x_samples_ddim = model.decode_first_stage(samples)
-                    x_samples_ddim = torch.clamp((x_samples_ddim+1.0)/2.0, min=0.0, max=1.0)
-
-                    for x_sample in x_samples_ddim:
-                        x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
-                        save_path = os.path.join(sample_path, file)
-                        Image.fromarray(x_sample.astype(np.uint8)).save(save_path)
-      
-                        base_count += 1
-                    all_samples.append(x_samples_ddim)
-
-
-        # additionally, save as grid
-        grid = torch.stack(all_samples, 0)
-        grid = rearrange(grid, 'n b c h w -> (n b) c h w')
-        grid = make_grid(grid, nrow=opt.n_samples)
-
-        # to image
-        grid = 255. * rearrange(grid, 'c h w -> h w c').cpu().numpy()
-        save_path = os.path.join(outpath, f'{prompt.replace(" ", "-")}.jpg')
-
-        
-        print(f"Your samples are ready and waiting four you here: \n{outpath} \nEnjoy.")
+    txt2img(
+        prompt=args.prompt,
+        outdir=args.outdir,
+        ddim_steps=args.ddim_steps,
+        plms=args.plms,
+        ddim_eta=args.ddim_eta,
+        n_iter=args.n_iter,
+        H=args.H,
+        W=args.W,
+        n_samples=args.n_samples,
+        scale=args.scale,
+        ckpt_path=args.ckpt_path,
+        embedding_path=args.embedding_path,
+        alpha=args.alpha,
+        content_path=args.content_path,
+        strength=args.strength,
+        seed=args.seed,
+    )
